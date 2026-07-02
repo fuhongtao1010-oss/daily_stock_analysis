@@ -1,6 +1,10 @@
 name: Testbox
 on:
   workflow_dispatch:
+    inputs:
+      testbox_id:
+        description: "Testbox ID"
+        required: true
 
 jobs:
   testbox:
