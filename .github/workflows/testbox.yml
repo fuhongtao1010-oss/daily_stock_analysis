@@ -1,0 +1,15 @@
+name: Testbox
+on:
+  workflow_dispatch:
+
+jobs:
+  testbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: useblacksmith/testbox@v1
+      - run: |
+          echo "Hello from Blacksmith Testbox!"
+          uname -a
+          pwd
+          ls -la
