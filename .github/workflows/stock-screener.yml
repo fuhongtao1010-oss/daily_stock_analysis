@@ -3,7 +3,7 @@ name: 智能选股推荐
 on:
   schedule:
     - cron: '0 22 * * 1-5'  # 工作日 06:00 北京时间 (UTC+8)
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   screen:
@@ -18,7 +18,7 @@ jobs:
 
       - name: 安装依赖
         run: |
-          pip install akshare pandas numpy tabulate
+          pip install requests pandas numpy
 
       - name: 运行全市场扫描选股
         run: |
