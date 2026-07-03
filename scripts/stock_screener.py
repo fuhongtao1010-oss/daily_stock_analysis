@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-A股智能选股推荐器 — 全市场扫描 + 多因子筛选 + AI 分析
-配合 GitHub Actions 每天自动推荐
+A股智能选股推荐器 — 全市场扫描 + 多因子筛选
+使用 push2.eastmoney.com API（轻量、海外可访问）
 """
 import os
 for k in list(os.environ):
     if 'proxy' in k.lower(): del os.environ[k]
 os.environ['NO_PROXY'] = '*'
 
-import sys, json, time, traceback
+import sys, json, traceback
 from datetime import datetime
-
 try:
-    import akshare as ak
     import pandas as pd
     import numpy as np
+    import requests
 except ImportError as e:
     print(f"缺少依赖: {e}")
     sys.exit(1)
@@ -22,26 +21,83 @@ except ImportError as e:
 pd.set_option('display.max_rows', 30)
 pd.set_option('display.width', 120)
 
+# push2.eastmoney.com 字段映射
+EM_FIELDS = 'f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f23,f37,f62,f115,f128,f140,f141,f136'
+COL_MAP = {
+    'f2': 'price', 'f3': 'pct', 'f4': 'change', 'f5': 'volume',
+    'f6': 'amount', 'f7': 'amplitude', 'f8': 'turnover', 'f9': 'pe',
+    'f12': 'code', 'f14': 'name', 'f15': 'high', 'f16': 'low',
+    'f17': 'open', 'f18': 'prev_close', 'f20': 'mcap', 'f21': 'fcap',
+    'f23': 'pb', 'f37': 'vol_ratio', 'f62': 'pct_5d',
+    'f115': 'pct_60d',
+}
+
+SESS = requests.Session()
+SESS.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'})
+
+
+def fetch_all_stocks():
+    """从 push2 API 获取全市场实时数据"""
+    url = ('http://push2.eastmoney.com/api/qt/clist/get'
+           '?pn=1&pz=6000&po=1&np=1&fltt=2&invt=2'
+           f'&fields={EM_FIELDS}'
+           '&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048')
+    r = SESS.get(url, timeout=15)
+    data = r.json()
+    items = data.get('data', {}).get('diff', [])
+    print(f"    共获取 {len(items)} 只股票数据")
+    if not items:
+        print("    ⚠️ 数据为空，尝试备用接口...")
+        # fallback: 只沪市
+        r2 = SESS.get(
+            'http://push2.eastmoney.com/api/qt/clist/get'
+            '?pn=1&pz=6000&po=1&np=1&fltt=2&invt=2'
+            f'&fields={EM_FIELDS}'
+            '&fs=m:0+t:6,m:0+t:80',
+            timeout=15
+        )
+        items = r2.json().get('data', {}).get('diff', [])
+        print(f"    备用接口: {len(items)} 只")
+    return items
+
 
 def screen_a_shares(min_price=5, max_price=200, min_volume_ratio=1.2, top_n=30):
-    """全市场扫描选股 — 多因子筛选"""
     print("  📥 获取全A股实时行情...")
-    df = ak.stock_zh_a_spot_em()
-    print(f"    共 {len(df)} 只股票")
+    items = fetch_all_stocks()
 
-    # 重命名列
-    col_map = {
-        '代码': 'code', '名称': 'name', '最新价': 'price',
-        '涨跌幅': 'pct', '涨跌额': 'change', '成交量': 'volume',
-        '成交额': 'amount', '振幅': 'amplitude', '换手率': 'turnover',
-        '市盈率-动态': 'pe', '市净率': 'pb',
-        '总市值': 'mcap', '流通市值': 'fcap',
-        '60日涨跌幅': 'pct_60d', '5日涨跌幅': 'pct_5d',
-        '量比': 'vol_ratio',
-    }
-    df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
+    rows = []
+    for item in items:
+        row = {}
+        for k, v in COL_MAP.items():
+            val = item.get(k)
+            if val is None or val == '-':
+                continue
+            row[v] = val
+        row['_valid'] = True
+        # 价格转浮点
+        if 'price' in row:
+            try: row['price'] = float(row['price'])
+            except: row['_valid'] = False
+        if 'pct' in row:
+            try: row['pct'] = float(row['pct'])
+            except: row['pct'] = 0.0
+        if 'turnover' in row:
+            try: row['turnover'] = float(row['turnover'])
+            except: row['turnover'] = 0.0
+        if 'mcap' in row:
+            try: row['mcap'] = float(row['mcap'])
+            except: row['mcap'] = 0.0
+        if 'vol_ratio' in row:
+            try: row['vol_ratio'] = float(row['vol_ratio'])
+            except: row['vol_ratio'] = 0.0
+        rows.append(row)
 
-    print(f"    可用列: {', '.join(df.columns.tolist())}")
+    df = pd.DataFrame(rows)
+    print(f"    解析后: {len(df)} 行, 列: {list(df.columns)}")
+
+    if df.empty:
+        print("  ❌ 没有数据")
+        return pd.DataFrame()
 
     # 基础过滤
     cond = (
@@ -90,7 +146,7 @@ def screen_a_shares(min_price=5, max_price=200, min_volume_ratio=1.2, top_n=30):
         score_weights['振幅'] = 10
 
     if 'mcap' in df.columns:
-        mcap_log = np.log10(df['mcap'])
+        mcap_log = np.log10(df['mcap'].replace(0, np.nan).fillna(1))
         ideal = mcap_log.median()
         mcap_score = 1 - abs(mcap_log - ideal) / (mcap_log.max() - mcap_log.min() + 1e-10)
         scores.append(mcap_score * 15)
@@ -116,11 +172,9 @@ def screen_a_shares(min_price=5, max_price=200, min_volume_ratio=1.2, top_n=30):
 
     df['score'] = sum(scores)
     df['score'] = df['score'].round(1)
-
     df = df.sort_values('score', ascending=False).head(top_n)
     df['rank'] = range(1, len(df) + 1)
 
-    # 安全的列选取
     out_cols = ['rank', 'code', 'name', 'price', 'pct', 'turnover', 'score']
     for extra in ['vol_ratio', 'pe', 'mcap']:
         if extra in df.columns:
@@ -130,9 +184,26 @@ def screen_a_shares(min_price=5, max_price=200, min_volume_ratio=1.2, top_n=30):
 
 def get_board_hot():
     try:
-        df = ak.stock_board_industry_name_em()
+        url = ('http://push2.eastmoney.com/api/qt/clist/get'
+               '?pn=1&pz=20&po=1&np=1&fltt=2&invt=2'
+               '&fields=f2,f3,f4,f12,f14,f104,f105,f136'
+               '&fs=m:90+t:3')  # 行业板块
+        r = SESS.get(url, timeout=10)
+        data = r.json()
+        items = data.get('data', {}).get('diff', [])
+        boards = []
+        for item in items:
+            name = item.get('f14', '')
+            pct = item.get('f3', 0)
+            up = item.get('f104', 0)
+            down = item.get('f105', 0)
+            if name:
+                boards.append({'板块名称': name, '涨跌幅': pct or 0,
+                               '上涨家数': up or 0, '下跌家数': down or 0,
+                               '领涨股': ''})
+        df = pd.DataFrame(boards)
         df = df.sort_values('涨跌幅', ascending=False).head(10)
-        return df[['板块名称', '涨跌幅', '上涨家数', '下跌家数', '领涨股']]
+        return df
     except Exception as e:
         print(f"  ⚠️ 板块数据获取失败: {e}")
         return None
@@ -143,12 +214,12 @@ def gen_telegram_report(screened, top_n=10):
     lines.append("🔥 *A股智能选股推荐*\n")
 
     boards = get_board_hot()
-    if boards is not None:
+    if boards is not None and not boards.empty:
         lines.append("*📊 今日热门板块*")
         for _, row in boards.iterrows():
             lines.append(
                 f"  {row['板块名称']}  {row['涨跌幅']:+.2f}%  "
-                f"↑{row['上涨家数']}↓{row['下跌家数']}"
+                f"↑{int(row['上涨家数'])}↓{int(row['下跌家数'])}"
             )
         lines.append("")
 
@@ -194,11 +265,10 @@ def main():
     print(f"  📊 今日热门板块")
     print(f"  {'='*55}")
     boards = get_board_hot()
-    if boards is not None:
+    if boards is not None and not boards.empty:
         for _, row in boards.iterrows():
             print(f"  {row['板块名称']:<12} {row['涨跌幅']:>+6.2f}%  "
-                  f"↑{row['上涨家数']}↓{row['下跌家数']}  "
-                  f"领涨: {row.get('领涨股', '')}")
+                  f"↑{int(row['上涨家数'])}↓{int(row['下跌家数'])}")
 
     report = gen_telegram_report(screened)
     with open("stock_recommend_report.md", "w") as f:
